@@ -1,0 +1,67 @@
+{
+  "tools": [
+    {
+      "name": "turn_light_on",
+      "description": "Turn on a light in the specified room.",
+      "endpoint": { "method": "POST", "url": "http://localhost:8123/api/services/light/turn_on" },
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "room": { "type": "string", "description": "Room name (e.g. living_room, bedroom, kitchen)" },
+          "brightness": { "type": "number", "description": "Brightness from 0-255" },
+          "color": { "type": "string", "description": "Light color (e.g. warm_white, daylight, red, blue)" }
+        },
+        "required": ["room"]
+      },
+      "defaults": { "brightness": 255 }
+    },
+    {
+      "name": "turn_light_off",
+      "description": "Turn off a light in the specified room.",
+      "endpoint": { "method": "POST", "url": "http://localhost:8123/api/services/light/turn_off" },
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "room": { "type": "string", "description": "Room name (e.g. living_room, bedroom, kitchen)" }
+        },
+        "required": ["room"]
+      }
+    },
+    {
+      "name": "set_thermostat",
+      "description": "Set the thermostat temperature.",
+      "endpoint": { "method": "POST", "url": "http://localhost:8123/api/services/climate/set_temperature" },
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "temperature": { "type": "number", "description": "Target temperature in degrees Celsius" },
+          "mode": { "type": "string", "description": "HVAC mode: heat, cool, auto, off" }
+        },
+        "required": ["temperature"]
+      },
+      "defaults": { "mode": "auto" }
+    },
+    {
+      "name": "get_thermostat",
+      "description": "Get the current thermostat status and temperature.",
+      "endpoint": { "method": "GET", "url": "http://localhost:8123/api/states/climate.home" },
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "lock_door",
+      "description": "Lock or unlock a door.",
+      "endpoint": { "method": "POST", "url": "http://localhost:8123/api/services/lock/lock" },
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "door": { "type": "string", "description": "Door name (e.g. front_door, back_door, garage)" },
+          "action": { "type": "string", "description": "Action: lock or unlock" }
+        },
+        "required": ["door", "action"]
+      }
+    }
+  ]
+}

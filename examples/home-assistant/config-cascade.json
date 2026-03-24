@@ -1,0 +1,22 @@
+{
+  "provider": "cascade",
+  "systemPrompt": "You are a smart home assistant. Control lights, thermostat, and doors via voice.\n\nRules:\n- Execute commands immediately without asking for confirmation.\n- Be friendly and concise. Max 1-2 sentences.\n- If a room isn't specified for lights, ask which room.\n- Confirm actions after execution (e.g. \"Living room lights on.\").\n- For temperature, default to Celsius unless the user specifies Fahrenheit.\n\nExamples:\n- \"Turn off the living room lights\" → call turn_light_off(living_room)\n- \"Set the temperature to 21 degrees\" → call set_thermostat(21)\n- \"Lock the front door\" → call lock_door(front_door, lock)\n- \"What's the temperature?\" → call get_thermostat() and read back",
+  "_comment": "Smart + great voice: Deepgram streaming STT + Anthropic Claude (best reasoning) + ElevenLabs Flash TTS. Target: ~1s latency.",
+  "stt": {
+    "provider": "deepgram",
+    "model": "nova-2",
+    "apiKey": "env:DEEPGRAM_API_KEY",
+    "language": "en"
+  },
+  "llm": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "apiKey": "env:ANTHROPIC_API_KEY"
+  },
+  "tts": {
+    "provider": "elevenlabs",
+    "voiceId": "JBFqnCBsd6RMkjVDRZzb",
+    "modelId": "eleven_flash_v2_5",
+    "apiKey": "env:ELEVENLABS_API_KEY"
+  }
+}

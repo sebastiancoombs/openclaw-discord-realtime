@@ -1,0 +1,7 @@
+{
+  "provider": "openai-realtime",
+  "systemPrompt": "You are a helpful voice assistant. Execute commands immediately when asked. Be concise — respond in 1-2 sentences.",
+  "voice": "coral",
+  "model": "gpt-realtime",
+  "turnDetection": "semantic_vad"
+}
