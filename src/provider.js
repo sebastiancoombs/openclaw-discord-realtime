@@ -17,26 +17,37 @@ import { ElevenLabsProvider }     from './providers/elevenlabs-provider.js';
 import { LocalProvider }          from './providers/local-provider.js';
 import { CascadeProvider }        from './providers/cascade-provider.js';
 
-export function createProvider(config, tools, executeTool) {
+export function createProvider(config, tools, executeTool, history) {
   // Default to openai-realtime for backward compatibility
-  const provider = config.provider || 'openai-realtime';
+  const providerName = config.provider || 'openai-realtime';
 
-  switch (provider) {
+  let provider;
+  switch (providerName) {
     case 'openai-realtime':
-      return new OpenAIRealtimeProvider(config, tools, executeTool);
+      provider = new OpenAIRealtimeProvider(config, tools, executeTool);
+      break;
 
     case 'elevenlabs':
-      return new ElevenLabsProvider(config, tools, executeTool);
+      provider = new ElevenLabsProvider(config, tools, executeTool);
+      break;
 
     case 'local':
-      return new LocalProvider(config, tools, executeTool);
+      provider = new LocalProvider(config, tools, executeTool);
+      break;
 
     case 'cascade':
-      return new CascadeProvider(config, tools, executeTool);
+      provider = new CascadeProvider(config, tools, executeTool);
+      break;
 
     default:
       throw new Error(
-        `Unknown provider: "${provider}". Supported: openai-realtime, elevenlabs, local, cascade`
+        `Unknown provider: "${providerName}". Supported: openai-realtime, elevenlabs, local, cascade`
       );
   }
+
+  if (history) {
+    provider.setHistory(history);
+  }
+
+  return provider;
 }

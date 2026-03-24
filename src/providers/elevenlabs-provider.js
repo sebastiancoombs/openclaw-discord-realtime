@@ -31,7 +31,8 @@
  *        user_transcript, assistant_transcript, response_done, error, ready
  */
 
-import { BaseVoiceProvider } from './base-provider.js';
+import { BaseVoiceProvider }    from './base-provider.js';
+import { ConversationHistory } from '../conversation-history.js';
 
 const ELEVENLABS_BASE   = 'https://api.elevenlabs.io';
 const OPENAI_CHAT_URL   = 'https://api.openai.com/v1/chat/completions';
@@ -85,7 +86,6 @@ export class ElevenLabsProvider extends BaseVoiceProvider {
     this._totalBytes     = 0;
     this._speaking       = false;
     this._silenceTimer   = null;
-    this._conversationHistory = [];
     this._isConnected    = true; // No persistent WS — always "connected" once ready
   }
 
@@ -195,11 +195,19 @@ export class ElevenLabsProvider extends BaseVoiceProvider {
 
   /** Run the LLM → tool calls → TTS leg of the pipeline. */
   async _processText(text) {
+    // Ensure we have a history instance (shared from index.js or created locally)
+    if (!this.history) this.history = new ConversationHistory();
+
     try {
       // ── Step 2: LLM with tool definitions ──
-      this._conversationHistory.push({ role: 'user', content: text });
+      this.history.addUserTurn(text);
 
-      const { reply, toolCalls } = await this._callLLM(this._conversationHistory);
+      // Build messages from shared history (elevenlabs uses OpenAI format for LLM)
+      const baseMessages = this.llmProvider === 'anthropic'
+        ? this.history.toAnthropicMessages()
+        : this.history.toOpenAIMessages();
+
+      const { reply, toolCalls } = await this._callLLM(baseMessages);
 
       // ── Step 3: Execute tool calls ──
       let finalReply = reply;
@@ -212,32 +220,33 @@ export class ElevenLabsProvider extends BaseVoiceProvider {
           try {
             const result = await this.executeTool(call.name, call.args);
             toolResults.push({ call, result });
+            this.history.addToolResult(call.name, call.args, result);
           } catch (err) {
             console.error(`[elevenlabs] Tool ${call.name} failed:`, err.message);
-            toolResults.push({ call, result: JSON.stringify({ error: err.message }) });
+            const errResult = JSON.stringify({ error: err.message });
+            toolResults.push({ call, result: errResult });
+            this.history.addToolResult(call.name, call.args, errResult);
           }
         }
 
-        // Append assistant tool_use message and tool results to history
-        this._conversationHistory.push({
-          role: 'assistant',
-          content: null,
-          tool_calls: toolCalls.map((c) => ({
-            id: c.id,
-            type: 'function',
-            function: { name: c.name, arguments: JSON.stringify(c.args) },
-          })),
-        });
-        this._conversationHistory.push(
+        // Build extended messages with tool calls/results for LLM follow-up
+        const followUpMessages = [
+          ...baseMessages,
+          {
+            role: 'assistant',
+            content: null,
+            tool_calls: toolCalls.map((c) => ({
+              id: c.id, type: 'function',
+              function: { name: c.name, arguments: JSON.stringify(c.args) },
+            })),
+          },
           ...toolResults.map(({ call, result }) => ({
-            role: 'tool',
-            tool_call_id: call.id,
-            content: result,
-          }))
-        );
+            role: 'tool', tool_call_id: call.id, content: result,
+          })),
+        ];
 
         // Re-call LLM with tool results for spoken reply
-        const { reply: followUp } = await this._callLLM(this._conversationHistory);
+        const { reply: followUp } = await this._callLLM(followUpMessages);
         finalReply = followUp;
       }
 
@@ -247,7 +256,7 @@ export class ElevenLabsProvider extends BaseVoiceProvider {
       }
 
       console.log(`[elevenlabs] Assistant reply: "${finalReply}"`);
-      this._conversationHistory.push({ role: 'assistant', content: finalReply });
+      this.history.addAssistantTurn(finalReply);
       this.emit('assistant_transcript', finalReply);
 
       // ── Step 4: TTS via ElevenLabs ──

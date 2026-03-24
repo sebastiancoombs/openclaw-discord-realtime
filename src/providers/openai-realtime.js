@@ -183,6 +183,7 @@ export class OpenAIRealtimeProvider extends BaseVoiceProvider {
           try {
             const args = JSON.parse(argsStr);
             const result = await this.executeTool(name, args);
+            if (this.history) this.history.addToolResult(name, args, result);
             this._send({
               type: 'conversation.item.create',
               item: { type: 'function_call_output', call_id, output: result },
@@ -205,6 +206,7 @@ export class OpenAIRealtimeProvider extends BaseVoiceProvider {
 
       case 'conversation.item.input_audio_transcription.completed':
         console.log(`[openai-realtime] User said: "${event.transcript}"`);
+        if (this.history) this.history.addUserTurn(event.transcript);
         this.emit('user_transcript', event.transcript);
         break;
 
@@ -213,6 +215,7 @@ export class OpenAIRealtimeProvider extends BaseVoiceProvider {
 
       case 'response.output_audio_transcript.done':
         console.log(`[openai-realtime] Assistant said: "${event.transcript}"`);
+        if (this.history) this.history.addAssistantTurn(event.transcript);
         this.emit('assistant_transcript', event.transcript);
         break;
 

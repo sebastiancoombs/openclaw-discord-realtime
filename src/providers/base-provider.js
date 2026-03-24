@@ -29,6 +29,12 @@ export class BaseVoiceProvider extends EventEmitter {
     this.config      = config      || {};
     this.tools       = tools       || [];
     this.executeTool = executeTool || null;
+    this.history     = null;
+  }
+
+  /** Set the shared ConversationHistory instance. */
+  setHistory(historyInstance) {
+    this.history = historyInstance;
   }
 
   /** Connect to the provider and emit 'ready' when ready. */
