@@ -1,5 +1,5 @@
 {
-  "name": "openclaw-discord-realtime",
+  "name": "discord-realtime",
   "version": "2.0.0",
   "description": "OpenClaw plugin: sub-500ms voice control via Discord voice channels using OpenAI Realtime API",
   "type": "module",
