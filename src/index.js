@@ -254,11 +254,18 @@ if (mode === 'twilio') {
     }
   }
 
+  // ── Auto-follow user IDs (comma-separated in env, or LISTEN_USER_ID as fallback) ──
+  const FOLLOW_USER_IDS = (process.env.DISCORD_FOLLOW_USER_IDS || LISTEN_USER_ID || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+
   // ── Discord ready ──
 
   discord.once(Events.ClientReady, async (client) => {
     console.log(`[BOT] Logged in as ${client.user.tag}`);
     console.log(`[BOT] Provider: ${appConfig.provider} | Tools: ${allTools.length}`);
+    if (FOLLOW_USER_IDS.length) {
+      console.log(`[BOT] Auto-follow enabled for: ${FOLLOW_USER_IDS.join(', ')}`);
+    }
 
     if (VOICE_CHANNEL_ID && GUILD_ID) {
       const guild = client.guilds.cache.get(GUILD_ID);
@@ -270,8 +277,43 @@ if (mode === 'twilio') {
           console.error(`❌ Voice channel ${VOICE_CHANNEL_ID} not found in guild ${GUILD_ID}`);
         }
       }
-    } else {
+    } else if (!FOLLOW_USER_IDS.length) {
       console.log('[BOT] No auto-join configured. Use !join in a text channel while in a voice channel.');
+    }
+  });
+
+  // ── Auto-follow: join/leave voice channels when tracked users do ──
+
+  discord.on(Events.VoiceStateUpdate, async (oldState, newState) => {
+    if (!FOLLOW_USER_IDS.includes(newState.id)) return;
+
+    const leftChannel = oldState.channel;
+    const joinedChannel = newState.channel;
+
+    // User joined or switched voice channels
+    if (joinedChannel && joinedChannel.id !== currentChannel?.id) {
+      console.log(`[AUTO-FOLLOW] ${newState.member?.displayName || newState.id} joined ${joinedChannel.name}`);
+      // Tear down existing session if active
+      if (provider) {
+        await saveSessionTranscript();
+        discordVoice.leave();
+        provider.disconnect();
+        provider = null;
+      }
+      await startVoiceBridge(joinedChannel);
+    }
+
+    // User left voice entirely (not a channel switch)
+    if (!joinedChannel && leftChannel && leftChannel.id === currentChannel?.id) {
+      // Check if any other followed users are still in the channel
+      const followedStillIn = leftChannel.members.some(m => FOLLOW_USER_IDS.includes(m.id));
+      if (!followedStillIn) {
+        console.log(`[AUTO-FOLLOW] ${newState.member?.displayName || newState.id} left voice — disconnecting`);
+        await saveSessionTranscript();
+        discordVoice.leave();
+        provider?.disconnect();
+        provider = null;
+      }
     }
   });
 
