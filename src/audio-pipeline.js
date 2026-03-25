@@ -1,22 +1,18 @@
 /**
  * Audio format conversion pipeline.
  *
- * Discord sends Opus at 48kHz stereo.
- * OpenAI Realtime expects PCM 16-bit mono 24kHz.
- * OpenAI Realtime sends PCM 16-bit mono 24kHz.
- * Discord expects Opus at 48kHz stereo.
+ * Discord: Opus 48kHz stereo
+ * OpenAI Realtime: PCM 16-bit mono 24kHz
  *
- * Pipeline:
- *   Discord Opus 48kHz → decode → PCM 48kHz stereo → resample → PCM 24kHz mono → Realtime API
- *   Realtime API → PCM 24kHz mono → resample → PCM 48kHz stereo → encode → Discord Opus
+ * Inbound:  Discord Opus 48kHz → decode → PCM 48kHz stereo → downsample → PCM 24kHz mono → Realtime
+ * Outbound: Realtime → PCM 24kHz mono → upsample → PCM 48kHz stereo → encode → Discord Opus
  */
 
 import { Transform } from 'stream';
 import prism from 'prism-media';
 
 /**
- * Create an Opus decoder that outputs PCM s16le.
- * Discord sends 48kHz stereo Opus frames.
+ * Opus decoder: Discord 48kHz stereo → PCM s16le.
  */
 export function createOpusDecoder() {
   return new prism.opus.Decoder({
@@ -27,7 +23,7 @@ export function createOpusDecoder() {
 }
 
 /**
- * Create an Opus encoder for sending audio back to Discord.
+ * Opus encoder: PCM s16le → Discord 48kHz stereo.
  */
 export function createOpusEncoder() {
   return new prism.opus.Encoder({
@@ -38,28 +34,29 @@ export function createOpusEncoder() {
 }
 
 /**
- * Resample PCM from 48kHz stereo to 24kHz mono.
- * Simple decimation + channel mixing (good enough for voice).
+ * Downsample PCM 48kHz stereo → 24kHz mono.
+ * Simple decimation + channel mixing (sufficient for voice).
  */
 export class Downsampler extends Transform {
   constructor() {
     super();
   }
 
-  _transform(chunk, encoding, callback) {
-    // Input: PCM s16le, 48kHz, stereo (4 bytes per sample pair)
-    // Output: PCM s16le, 24kHz, mono (2 bytes per sample)
-    const samples = chunk.length / 4; // each stereo sample = 4 bytes (2 channels × 2 bytes)
-    const output = Buffer.alloc(Math.floor(samples / 2) * 2); // 2:1 downsample, mono
+  _transform(chunk, _encoding, callback) {
+    // Input: 4 bytes per stereo sample pair (2 channels × 2 bytes)
+    // Output: 2 bytes per mono sample, 2:1 downsample
+    const samples = chunk.length / 4;
+    const output = Buffer.alloc(Math.floor(samples / 2) * 2);
     let outIdx = 0;
 
     for (let i = 0; i < samples; i += 2) {
-      // Take every other stereo sample pair, mix to mono
       const offset = i * 4;
       if (offset + 3 >= chunk.length) break;
+
       const left = chunk.readInt16LE(offset);
       const right = chunk.readInt16LE(offset + 2);
       const mono = Math.round((left + right) / 2);
+
       if (outIdx + 1 < output.length) {
         output.writeInt16LE(Math.max(-32768, Math.min(32767, mono)), outIdx);
         outIdx += 2;
@@ -71,25 +68,25 @@ export class Downsampler extends Transform {
 }
 
 /**
- * Resample PCM from 24kHz mono to 48kHz stereo.
- * Simple interpolation + channel duplication.
+ * Upsample PCM 24kHz mono → 48kHz stereo.
+ * Simple duplication + channel copy.
  */
 export class Upsampler extends Transform {
   constructor() {
     super();
   }
 
-  _transform(chunk, encoding, callback) {
-    // Input: PCM s16le, 24kHz, mono (2 bytes per sample)
-    // Output: PCM s16le, 48kHz, stereo (4 bytes × 2 per input sample)
+  _transform(chunk, _encoding, callback) {
+    // Input: 2 bytes per mono sample
+    // Output: 8 bytes per output (2× upsample, stereo = 4 bytes × 2)
     const monoSamples = chunk.length / 2;
-    const output = Buffer.alloc(monoSamples * 2 * 4); // 2× upsample, stereo = 4 bytes per output sample × 2
+    const output = Buffer.alloc(monoSamples * 8);
     let outIdx = 0;
 
     for (let i = 0; i < monoSamples; i++) {
       const sample = chunk.readInt16LE(i * 2);
 
-      // Duplicate sample twice (2:1 upsample) and to both channels (stereo)
+      // Duplicate twice (2:1 upsample), both channels (stereo)
       for (let dup = 0; dup < 2; dup++) {
         output.writeInt16LE(sample, outIdx);     // left
         output.writeInt16LE(sample, outIdx + 2); // right
@@ -102,8 +99,8 @@ export class Upsampler extends Transform {
 }
 
 /**
- * Buffer PCM audio into fixed-size chunks for Opus encoding.
- * Opus encoder expects exactly 960 stereo samples = 3840 bytes per frame.
+ * Buffer PCM into fixed-size frames for Opus encoding.
+ * Opus expects exactly 960 stereo samples = 3840 bytes per frame.
  */
 export class PCMFramer extends Transform {
   constructor(frameSize = 3840) {
@@ -112,20 +109,18 @@ export class PCMFramer extends Transform {
     this.buffer = Buffer.alloc(0);
   }
 
-  _transform(chunk, encoding, callback) {
+  _transform(chunk, _encoding, callback) {
     this.buffer = Buffer.concat([this.buffer, chunk]);
 
     while (this.buffer.length >= this.frameSize) {
-      const frame = this.buffer.subarray(0, this.frameSize);
+      this.push(this.buffer.subarray(0, this.frameSize));
       this.buffer = this.buffer.subarray(this.frameSize);
-      this.push(frame);
     }
 
     callback();
   }
 
   _flush(callback) {
-    // Pad final frame with silence if needed
     if (this.buffer.length > 0) {
       const padded = Buffer.alloc(this.frameSize, 0);
       this.buffer.copy(padded);

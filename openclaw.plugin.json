@@ -1,33 +1,39 @@
 {
   "id": "discord-realtime",
   "name": "Discord Realtime Voice",
-  "description": "Sub-500ms voice control via Discord voice channels using OpenAI Realtime API",
+  "description": "Voice bridge: Discord voice channel ↔ OpenAI Realtime API with tool calling",
   "configSchema": {
     "type": "object",
     "properties": {
-      "provider": { "type": "string", "enum": ["openai-realtime", "elevenlabs", "cascade"], "default": "openai-realtime" },
-      "systemPrompt": { "type": "string" },
-      "voice": { "type": "string", "default": "coral" },
-      "model": { "type": "string", "default": "gpt-4o-realtime-preview" },
-      "turnDetection": { "type": "string", "default": "server_vad" },
-      "tools": { "type": "array", "items": { "type": "object" } },
-      "followUserIds": { "type": "array", "items": { "type": "string" } },
-      "transcriptDir": { "type": "string" },
-      "memory": {
-        "type": "object",
-        "properties": {
-          "enabled": { "type": "boolean", "default": true },
-          "loadPreviousSessions": { "type": "integer", "default": 3 },
-          "maxContextTurns": { "type": "integer", "default": 10 }
-        }
+      "followUserIds": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Discord user IDs to auto-follow into voice channels"
       },
-      "history": {
-        "type": "object",
-        "properties": {
-          "maxTurns": { "type": "integer", "default": 50 }
-        }
+      "voice": {
+        "type": "string",
+        "default": "coral",
+        "description": "OpenAI Realtime TTS voice"
+      },
+      "model": {
+        "type": "string",
+        "default": "gpt-4o-realtime-preview",
+        "description": "OpenAI Realtime model"
+      },
+      "systemPrompt": {
+        "type": "string",
+        "description": "System instructions for the voice assistant"
+      },
+      "turnDetection": {
+        "type": "string",
+        "enum": ["server_vad", "semantic_vad"],
+        "default": "semantic_vad"
+      },
+      "transcriptDir": {
+        "type": "string",
+        "description": "Directory for saving voice transcripts"
       }
     },
-    "additionalProperties": true
+    "additionalProperties": false
   }
 }

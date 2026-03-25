@@ -1,249 +1,196 @@
 /**
- * OpenClaw Plugin: Discord Realtime Voice
+ * OpenClaw Plugin: Discord Realtime Voice (v3 — clean rewrite)
  *
- * Bridges Discord voice channels ↔ a configurable voice provider (OpenAI Realtime,
- * ElevenLabs, Cascade) for sub-500ms voice control with function calling tools.
+ * Bridges Discord voice ↔ OpenAI Realtime API.
+ * One bot (OpenClaw's Discord gateway). No second client.
  *
- * Hooks into OpenClaw's existing Discord voice infrastructure — does NOT create
- * its own Discord client.
+ * Uses:
+ *   - api.registerService()  → lifecycle-managed voice bridge
+ *   - api.registerTool()     → expose tools to the Realtime API via invokeTool
+ *   - api.registerCommand()  → /rtstatus for bridge health
+ *   - getGateway()           → Carbon's Discord gateway for voice adapter
  */
 
 import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';
-import { DiscordVoice } from './discord-voice.js';
-import { createProvider } from './provider.js';
-import { loadTools } from './tools.js';
-import { ConversationHistory } from './conversation-history.js';
-import { VoiceMemory } from './memory.js';
+import { getGateway } from 'openclaw/plugin-sdk/discord';
+import { VoiceBridge } from './voice-bridge.js';
 
 export default definePluginEntry({
   id: 'discord-realtime',
   name: 'Discord Realtime Voice',
-  description: 'Sub-500ms voice control via Discord voice channels using OpenAI Realtime API',
+
   register(api) {
     const log = api.logger;
     const config = api.pluginConfig || {};
+    const followUserIds = new Set(config.followUserIds || []);
 
-    // ── State ──
-
-    let discordVoice = null;
-    let provider = null;
-    let history = null;
-    let memory = null;
-    let currentChannel = null;
-    let sessionStartTime = null;
-    let isStreamingResponse = false;
-
-    // ── Tools ──
-
-    let realtimeTools = [];
-    let executeToolFn = null;
-
-    if (config.tools && Array.isArray(config.tools)) {
-      realtimeTools = config.tools.map((tool) => ({
-        type: 'function',
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters,
-      }));
+    if (!followUserIds.size) {
+      log.warn('No followUserIds configured — voice auto-join disabled');
+      return;
     }
 
-    if (config.toolsFile) {
-      try {
-        const loaded = loadTools(config.toolsFile);
-        realtimeTools = [...realtimeTools, ...loaded.tools];
-        executeToolFn = loaded.executeTool;
-      } catch (err) {
-        log.warn(`Failed to load tools file: ${err.message}`);
-      }
+    if (!process.env.OPENAI_API_KEY) {
+      log.error('OPENAI_API_KEY not set — voice bridge cannot start');
+      return;
     }
 
-    async function executeAnyTool(toolName, args) {
-      if (executeToolFn) {
-        const result = await executeToolFn(toolName, args);
-        if (!result.includes('"error":"Unknown tool:')) return result;
-      }
-      if (api.runtime) {
+    // ── Voice bridge (lifecycle-managed) ──
+    let bridge = null;
+    let listenerRegistered = false;
+
+    /**
+     * Tool executor: routes tool calls from Realtime API → OpenClaw's registered tools.
+     */
+    async function executeTool(name, args) {
+      if (api.runtime?.invokeTool) {
         try {
-          const result = await api.runtime.invokeTool(toolName, args);
-          return typeof result === 'string' ? result : JSON.stringify(result);
-        } catch (err) {
-          return JSON.stringify({ error: err.message });
+          const result = await api.runtime.invokeTool(name, args);
+          return JSON.stringify(result);
+        } catch (e) {
+          return JSON.stringify({ error: e.message });
         }
       }
-      return JSON.stringify({ error: `No executor for tool: ${toolName}` });
+      return JSON.stringify({ error: `Tool not available: ${name}` });
     }
 
-    // ── Transcript save helper ──
+    /**
+     * Start bridge in a voice channel.
+     */
+    async function startBridge(channelId, guildId) {
+      if (bridge?.channelId === channelId && bridge?.isConnected) return;
+      await stopBridge();
 
-    async function saveSessionTranscript() {
-      if (memory?.enabled && history && history.length > 0) {
-        await memory.saveTranscript(history, {
-          channelName: currentChannel?.name || 'voice',
-          guildName: currentChannel?.guild?.name || 'unknown',
-          startTime: sessionStartTime,
-          provider: config.provider || 'openai-realtime',
-        });
+      const gw = getGateway();
+      const client = gw?.client;
+      if (!client) {
+        log.error('Cannot start bridge: Discord gateway not available');
+        return;
+      }
+
+      const voicePlugin = client.getPlugin('voice');
+      const adapterCreator = voicePlugin?.getGatewayAdapterCreator(guildId);
+      if (!adapterCreator) {
+        log.error('Cannot start bridge: voice adapter not available');
+        return;
+      }
+
+      const botUserId = client.options?.clientId;
+
+      bridge = new VoiceBridge({
+        channelId,
+        guildId,
+        adapterCreator,
+        botUserId,
+        apiKey: process.env.OPENAI_API_KEY,
+        model: config.model || 'gpt-4o-realtime-preview',
+        voice: config.voice || 'coral',
+        systemPrompt: config.systemPrompt || 'You are a voice assistant. Be concise.',
+        turnDetection: config.turnDetection || 'semantic_vad',
+        executeTool,
+        log,
+      });
+
+      await bridge.start();
+    }
+
+    /**
+     * Stop and tear down the bridge.
+     */
+    async function stopBridge() {
+      if (bridge) {
+        bridge.destroy();
+        bridge = null;
       }
     }
 
-    // ── Core: Voice Bridge ──
+    /**
+     * Register VOICE_STATE_UPDATE listener on Carbon's gateway.
+     * Called once when the gateway client is available.
+     */
+    function registerVoiceListener() {
+      if (listenerRegistered) return;
 
-    async function startVoiceBridge(channel, listenUserIds) {
-      log.info(`Starting voice bridge in #${channel.name} (provider: ${config.provider || 'openai-realtime'})`);
+      const gw = getGateway();
+      const client = gw?.client;
+      if (!client) return false;
 
-      currentChannel = channel;
-      sessionStartTime = new Date().toISOString();
+      client.registerListener({
+        type: 'VOICE_STATE_UPDATE',
+        parseRawData: (d) => d,
+        handle: (data) => {
+          if (!followUserIds.has(data.user_id)) return;
 
-      discordVoice = new DiscordVoice();
-      await discordVoice.join(channel);
-
-      history = new ConversationHistory(config.history?.maxTurns || 50);
-
-      let previousContext = '';
-      if (memory?.enabled) {
-        previousContext = await memory.loadPreviousContext();
-      }
-
-      let systemPrompt = config.systemPrompt || 'You are a voice assistant. Be concise.';
-      if (previousContext) {
-        systemPrompt += '\n\nYou have memory of previous voice conversations:\n' + previousContext;
-      }
-
-      const sessionConfig = { ...config, systemPrompt, provider: config.provider || 'openai-realtime' };
-      provider = createProvider(sessionConfig, realtimeTools, executeAnyTool, history);
-
-      discordVoice.on('audio', (pcmChunk) => provider.sendAudio(pcmChunk));
-
-      provider.on('speech_started', () => {
-        if (isStreamingResponse) { discordVoice.endPlayback(); isStreamingResponse = false; }
+          if (data.channel_id) {
+            startBridge(data.channel_id, data.guild_id).catch(e =>
+              log.error(`Auto-join failed: ${e.message}`)
+            );
+          } else {
+            stopBridge().catch(e =>
+              log.error(`Auto-leave failed: ${e.message}`)
+            );
+          }
+        },
       });
 
-      provider.on('audio', (pcmChunk) => {
-        if (!isStreamingResponse) { discordVoice.startPlayback(); isStreamingResponse = true; }
-        discordVoice.appendAudio(pcmChunk);
-      });
-
-      provider.on('audio_done', () => { discordVoice.endPlayback(); isStreamingResponse = false; });
-
-      provider.on('user_transcript', (text) => {
-        log.info(`User: ${text}`);
-        if (!history.turns.length || history.turns[history.turns.length - 1].content !== text) {
-          history.addUserTurn(text);
-        }
-      });
-
-      provider.on('assistant_transcript', (text) => {
-        log.info(`Assistant: ${text}`);
-        if (!history.turns.length || history.turns[history.turns.length - 1].content !== text) {
-          history.addAssistantTurn(text);
-        }
-      });
-
-      provider.on('error', (err) => log.error(`Provider error: ${err.message}`));
-      provider.on('disconnected', async () => { log.warn('Provider disconnected'); await saveSessionTranscript(); });
-
-      provider.connect();
-
-      provider.once('ready', () => {
-        if (listenUserIds?.length) {
-          discordVoice.listenTo(listenUserIds[0]);
-        } else {
-          discordVoice.listenToAll();
-        }
-        log.info('Voice bridge active');
-      });
+      listenerRegistered = true;
+      log.info(`Voice listener registered — following ${followUserIds.size} user(s)`);
+      return true;
     }
 
-    async function stopVoiceBridge() {
-      await saveSessionTranscript();
-      discordVoice?.leave();
-      provider?.disconnect();
-      discordVoice = null;
-      provider = null;
-      history = null;
-      currentChannel = null;
-      isStreamingResponse = false;
-    }
-
-    // ── Register Service (uses `id`, `start`, `stop`) ──
-
+    // ── Service: lifecycle-managed startup/shutdown ──
     api.registerService({
       id: 'discord-realtime-voice',
-      start: async () => {
-        memory = new VoiceMemory({
-          ...(config.memory || {}),
-          transcriptDir: config.transcriptDir,
-        });
-        log.info(`Discord Realtime Voice service started (provider: ${config.provider || 'openai-realtime'}, tools: ${realtimeTools.length})`);
-      },
-      stop: async () => {
-        await stopVoiceBridge();
-        log.info('Discord Realtime Voice service stopped');
-      },
-    });
+      name: 'Discord Realtime Voice Bridge',
 
-    // ── Register Commands (uses `handler` not `execute`, `args` is a string not array) ──
+      async start() {
+        // Try to register immediately if gateway is ready
+        if (registerVoiceListener()) return;
 
-    api.registerCommand({
-      name: 'rtjoin',
-      description: 'Join your voice channel with OpenAI Realtime',
-      acceptsArgs: false,
-      handler: async (ctx) => {
-        const voiceChannel = ctx.member?.voice?.channel;
-        if (!voiceChannel) {
-          return { text: 'Join a voice channel first.' };
-        }
-        if (currentChannel?.id === voiceChannel.id && provider?.connected) {
-          return { text: `Already connected to **${voiceChannel.name}**.` };
-        }
-        if (provider) await stopVoiceBridge();
-        await startVoiceBridge(voiceChannel, config.followUserIds);
-        return { text: `🎙️ Joined **${voiceChannel.name}**. Realtime voice active.` };
+        // Otherwise wait for gateway to become available
+        // Check periodically with bounded retries
+        let attempts = 0;
+        const maxAttempts = 20;
+        const interval = setInterval(() => {
+          attempts++;
+          if (registerVoiceListener() || attempts >= maxAttempts) {
+            clearInterval(interval);
+            if (attempts >= maxAttempts && !listenerRegistered) {
+              log.error('Gave up waiting for Discord gateway after 60s');
+            }
+          }
+        }, 3000);
+
+        // Store interval ref for cleanup
+        this._waitInterval = interval;
       },
-    });
 
-    api.registerCommand({
-      name: 'rtleave',
-      description: 'Leave the voice channel (Realtime)',
-      acceptsArgs: false,
-      handler: async (ctx) => {
-        if (!provider) {
-          return { text: 'Not connected to any voice channel.' };
-        }
-        await stopVoiceBridge();
-        return { text: '👋 Left voice channel.' };
+      async stop() {
+        if (this._waitInterval) clearInterval(this._waitInterval);
+        await stopBridge();
+        listenerRegistered = false;
+        log.info('Voice bridge service stopped');
       },
-    });
 
-    api.registerCommand({
-      name: 'rtsay',
-      description: 'Send text to the Realtime voice provider',
-      acceptsArgs: true,
-      handler: async (ctx) => {
-        const text = (ctx.args || '').trim();
-        if (!text) return { text: 'Usage: /rtsay <text>' };
-        if (!provider?.connected) return { text: 'Not connected. Use /rtjoin first.' };
-        provider.sendText(text);
-        return { text: `📝 Sent: "${text}"` };
-      },
-    });
-
-    api.registerCommand({
-      name: 'rtstatus',
-      description: 'Show Realtime voice bridge status',
-      acceptsArgs: false,
-      handler: async (ctx) => {
-        const pStatus = provider?.connected ? '✅' : '❌';
-        const vStatus = discordVoice?.connection ? '✅' : '❌';
+      health() {
         return {
-          text: `**Discord Realtime Voice**\n` +
-            `Voice: ${vStatus} | Provider: ${config.provider || 'openai-realtime'} ${pStatus}\n` +
-            `Tools: ${realtimeTools.length} | History: ${history?.length || 0} turns\n` +
-            `Memory: ${memory?.enabled ? '✅' : '❌'}`,
+          status: bridge?.isConnected ? 'healthy' : 'idle',
+          channel: bridge?.channelId || null,
+          realtimeConnected: bridge?.isRealtimeConnected || false,
         };
       },
     });
 
-    log.info(`discord-realtime plugin registered (${realtimeTools.length} tools)`);
+    // ── Command: /rtstatus ──
+    api.registerCommand({
+      name: 'rtstatus',
+      description: 'Voice bridge status',
+      handler: async () => ({
+        text: bridge
+          ? `🎙️ Voice: ✅ (${bridge.channelId}) | Realtime: ${bridge.isRealtimeConnected ? '✅' : '❌'}`
+          : '🎙️ Voice bridge idle — join a voice channel to activate',
+      }),
+    });
+
+    log.info(`Plugin registered — following ${followUserIds.size} user(s)`);
   },
 });
