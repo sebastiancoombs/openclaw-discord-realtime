@@ -31,6 +31,8 @@ export class DiscordVoice extends EventEmitter {
     this._audioQueue = [];
     this._isPlaying = false;
     this._playbackStream = null;
+    /** @type {Map<string, { opusStream: any, decoder: any, downsampler: any }>} */
+    this._activeListeners = new Map();
 
     // When player goes idle, check for queued audio
     this.player.on(AudioPlayerStatus.Idle, () => {
@@ -84,7 +86,9 @@ export class DiscordVoice extends EventEmitter {
 
   /**
    * Start listening to a specific user's audio.
-   * @param {string} userId - Discord user ID
+   * Tracks active subscriptions and cleans up old decoder pipelines
+   * to prevent listener leaks.
+   * @param {string} userId - Discord user ID (null for all users)
    */
   listenTo(userId) {
     if (!this.connection) throw new Error('Not connected to voice channel');
@@ -94,32 +98,44 @@ export class DiscordVoice extends EventEmitter {
     receiver.speaking.on('start', (speakingUserId) => {
       if (userId && speakingUserId !== userId) return;
 
+      // If there's already an active pipeline for this user, skip —
+      // don't create a new decoder on every 'start' event
+      if (this._activeListeners.has(speakingUserId)) return;
+
       console.log(`[DISCORD] User ${speakingUserId} started speaking`);
 
-      // Subscribe to user's audio stream
       const opusStream = receiver.subscribe(speakingUserId, {
         end: {
           behavior: EndBehaviorType.AfterSilence,
-          duration: 1000, // 1 second of silence ends the stream
+          duration: 1000,
         },
       });
 
-      // Decode Opus → PCM 48kHz stereo → downsample to 24kHz mono
       const decoder = createOpusDecoder();
       const downsampler = new Downsampler();
+
+      this._activeListeners.set(speakingUserId, { opusStream, decoder, downsampler });
+
+      const cleanup = () => {
+        this._activeListeners.delete(speakingUserId);
+        opusStream.destroy();
+        decoder.destroy();
+        downsampler.destroy();
+      };
 
       opusStream
         .pipe(decoder)
         .pipe(downsampler)
         .on('data', (pcmChunk) => {
-          // Emit PCM 24kHz mono chunks for the Realtime API
           this.emit('audio', pcmChunk);
         })
         .on('end', () => {
           console.log(`[DISCORD] User ${speakingUserId} stopped speaking`);
+          cleanup();
         })
         .on('error', (err) => {
           console.error(`[DISCORD] Audio decode error:`, err.message);
+          cleanup();
         });
     });
 
@@ -227,6 +243,14 @@ export class DiscordVoice extends EventEmitter {
    * Leave the voice channel.
    */
   leave() {
+    // Clean up all active listener pipelines
+    for (const [, { opusStream, decoder, downsampler }] of this._activeListeners) {
+      opusStream.destroy();
+      decoder.destroy();
+      downsampler.destroy();
+    }
+    this._activeListeners.clear();
+
     if (this.connection) {
       this.connection.destroy();
       this.connection = null;

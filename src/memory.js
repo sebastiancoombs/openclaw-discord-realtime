@@ -11,9 +11,20 @@ import { join, resolve } from 'path';
 import { homedir } from 'os';
 
 export class VoiceMemory {
+  /**
+   * @param {object} config
+   * @param {boolean}  [config.enabled=true]
+   * @param {string}   [config.transcriptDir] - Override transcript directory.
+   *   Falls back to OPENCLAW_WORKSPACE_MEMORY env var, then ~/.openclaw/workspace/memory/voice.
+   * @param {number}   [config.loadPreviousSessions=3]
+   * @param {number}   [config.maxContextTurns=10]
+   */
   constructor(config = {}) {
     this.enabled = config.enabled !== false;
-    this.transcriptDir = resolveHome(config.transcriptDir || '~/.openclaw/workspace/memory/voice');
+    const defaultDir = process.env.OPENCLAW_WORKSPACE_MEMORY
+      ? join(process.env.OPENCLAW_WORKSPACE_MEMORY, 'voice')
+      : '~/.openclaw/workspace/memory/voice';
+    this.transcriptDir = resolveHome(config.transcriptDir || defaultDir);
     this.loadPreviousSessions = config.loadPreviousSessions ?? 3;
     this.maxContextTurns = config.maxContextTurns ?? 10;
   }

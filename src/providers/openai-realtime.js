@@ -88,20 +88,13 @@ export class OpenAIRealtimeProvider extends BaseVoiceProvider {
     this._send({
       type: 'session.update',
       session: {
-        type: 'realtime',
-        model: this.model,
+        modalities: ['text', 'audio'],
         instructions: this.systemPrompt,
-        output_modalities: ['audio'],
-        audio: {
-          input: {
-            format: { type: 'audio/pcm', rate: 24000 },
-            turn_detection: { type: this.turnDetection },
-          },
-          output: {
-            format: { type: 'audio/pcm' },
-            voice: this.voice,
-          },
-        },
+        voice: this.voice,
+        input_audio_format: 'pcm16',
+        output_audio_format: 'pcm16',
+        input_audio_transcription: { model: 'whisper-1' },
+        turn_detection: { type: this.turnDetection },
         tools: this.tools,
         tool_choice: this.tools.length > 0 ? 'auto' : 'none',
       },
