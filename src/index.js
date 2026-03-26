@@ -1,14 +1,22 @@
 /**
- * OpenClaw Plugin: Discord Realtime Voice (v3 — clean rewrite)
+ * OpenClaw Plugin: Discord Realtime Voice (v3)
  *
  * Bridges Discord voice ↔ OpenAI Realtime API.
- * One bot (OpenClaw's Discord gateway). No second client.
+ * Uses OpenClaw's Discord gateway (Carbon). No second bot.
  *
- * Uses:
- *   - api.registerService()  → lifecycle-managed voice bridge
- *   - api.registerTool()     → expose tools to the Realtime API via invokeTool
- *   - api.registerCommand()  → /rtstatus for bridge health
- *   - getGateway()           → Carbon's Discord gateway for voice adapter
+ * register(api):
+ *   - Registers a gateway_start hook (deferred, non-blocking)
+ *   - Registers a /rtstatus command
+ *   - Does NOT start anything or poll anything
+ *
+ * gateway_start hook:
+ *   - Gets the Carbon gateway client
+ *   - Registers a VOICE_STATE_UPDATE listener
+ *   - That's it — purely event-driven from here
+ *
+ * VOICE_STATE_UPDATE:
+ *   - Followed user joins → start bridge
+ *   - Followed user leaves → stop bridge
  */
 
 import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';
@@ -18,6 +26,7 @@ import { VoiceBridge } from './voice-bridge.js';
 export default definePluginEntry({
   id: 'discord-realtime',
   name: 'Discord Realtime Voice',
+  description: 'Voice bridge: Discord voice ↔ OpenAI Realtime API with tool calling',
 
   register(api) {
     const log = api.logger;
@@ -25,159 +34,140 @@ export default definePluginEntry({
     const followUserIds = new Set(config.followUserIds || []);
 
     if (!followUserIds.size) {
-      log.warn('No followUserIds configured — voice auto-join disabled');
+      log.warn('[discord-realtime] No followUserIds configured — voice auto-join disabled');
       return;
     }
 
     if (!process.env.OPENAI_API_KEY) {
-      log.error('OPENAI_API_KEY not set — voice bridge cannot start');
-      return;
+      log.warn('[discord-realtime] OPENAI_API_KEY not set — voice bridge will not work');
     }
 
-    // ── Voice bridge (lifecycle-managed) ──
+    // ── Bridge state ──
     let bridge = null;
-    let listenerRegistered = false;
 
-    /**
-     * Tool executor: routes tool calls from Realtime API → OpenClaw's registered tools.
-     */
-    async function executeTool(name, args) {
-      if (api.runtime?.invokeTool) {
-        try {
-          const result = await api.runtime.invokeTool(name, args);
-          return JSON.stringify(result);
-        } catch (e) {
-          return JSON.stringify({ error: e.message });
-        }
-      }
-      return JSON.stringify({ error: `Tool not available: ${name}` });
-    }
-
-    /**
-     * Start bridge in a voice channel.
-     */
     async function startBridge(channelId, guildId) {
+      // Don't re-join the same channel
       if (bridge?.channelId === channelId && bridge?.isConnected) return;
+
+      // Tear down any existing bridge first
       await stopBridge();
 
       const gw = getGateway();
       const client = gw?.client;
       if (!client) {
-        log.error('Cannot start bridge: Discord gateway not available');
+        log.error('[discord-realtime] Cannot start bridge: no Discord client');
         return;
       }
 
       const voicePlugin = client.getPlugin('voice');
-      const adapterCreator = voicePlugin?.getGatewayAdapterCreator(guildId);
+      if (!voicePlugin) {
+        log.error('[discord-realtime] Cannot start bridge: no voice plugin on Carbon client');
+        return;
+      }
+
+      const adapterCreator = voicePlugin.getGatewayAdapterCreator(guildId);
       if (!adapterCreator) {
-        log.error('Cannot start bridge: voice adapter not available');
+        log.error('[discord-realtime] Cannot start bridge: no voice adapter for guild');
         return;
       }
 
       const botUserId = client.options?.clientId;
 
-      bridge = new VoiceBridge({
-        channelId,
-        guildId,
-        adapterCreator,
-        botUserId,
-        apiKey: process.env.OPENAI_API_KEY,
-        model: config.model || 'gpt-4o-realtime-preview',
-        voice: config.voice || 'coral',
-        systemPrompt: config.systemPrompt || 'You are a voice assistant. Be concise.',
-        turnDetection: config.turnDetection || 'semantic_vad',
-        executeTool,
-        log,
-      });
+      try {
+        bridge = new VoiceBridge({
+          channelId,
+          guildId,
+          adapterCreator,
+          botUserId,
+          apiKey: process.env.OPENAI_API_KEY,
+          model: config.model || 'gpt-4o-realtime-preview',
+          voice: config.voice || 'coral',
+          systemPrompt: config.systemPrompt || 'You are a voice assistant. Be concise.',
+          turnDetection: config.turnDetection || 'semantic_vad',
+          log,
+        });
 
-      await bridge.start();
+        await bridge.start();
+        log.info(`[discord-realtime] Bridge active in channel ${channelId}`);
+      } catch (err) {
+        log.error(`[discord-realtime] Failed to start bridge: ${err.message}`);
+        bridge = null;
+      }
     }
 
-    /**
-     * Stop and tear down the bridge.
-     */
     async function stopBridge() {
       if (bridge) {
-        bridge.destroy();
+        try {
+          bridge.destroy();
+        } catch (err) {
+          log.error(`[discord-realtime] Error destroying bridge: ${err.message}`);
+        }
         bridge = null;
       }
     }
 
     /**
-     * Register VOICE_STATE_UPDATE listener on Carbon's gateway.
-     * Called once when the gateway client is available.
+     * Register the VOICE_STATE_UPDATE listener on Carbon's client.
+     * Called once, when we know the gateway client exists.
      */
-    function registerVoiceListener() {
-      if (listenerRegistered) return;
-
-      const gw = getGateway();
-      const client = gw?.client;
-      if (!client) return false;
-
+    function registerVoiceListener(client) {
       client.registerListener({
         type: 'VOICE_STATE_UPDATE',
         parseRawData: (d) => d,
         handle: (data) => {
+          // Ignore users we don't follow
           if (!followUserIds.has(data.user_id)) return;
 
           if (data.channel_id) {
-            startBridge(data.channel_id, data.guild_id).catch(e =>
-              log.error(`Auto-join failed: ${e.message}`)
+            // User joined or switched channel
+            startBridge(data.channel_id, data.guild_id).catch(err =>
+              log.error(`[discord-realtime] Auto-join error: ${err.message}`)
             );
           } else {
-            stopBridge().catch(e =>
-              log.error(`Auto-leave failed: ${e.message}`)
+            // User left voice
+            stopBridge().catch(err =>
+              log.error(`[discord-realtime] Auto-leave error: ${err.message}`)
             );
           }
         },
       });
 
-      listenerRegistered = true;
-      log.info(`Voice listener registered — following ${followUserIds.size} user(s)`);
-      return true;
+      log.info(`[discord-realtime] VOICE_STATE_UPDATE listener registered — following ${followUserIds.size} user(s)`);
     }
 
-    // ── Service: lifecycle-managed startup/shutdown ──
-    api.registerService({
-      id: 'discord-realtime-voice',
-      name: 'Discord Realtime Voice Bridge',
+    // ── Hook: gateway_start — fires when OpenClaw gateway is listening ──
+    api.on('gateway_start', () => {
+      const gw = getGateway();
+      const client = gw?.client;
 
-      async start() {
-        // Try to register immediately if gateway is ready
-        if (registerVoiceListener()) return;
+      if (!client) {
+        log.error('[discord-realtime] gateway_start fired but no Discord client available');
+        return;
+      }
 
-        // Otherwise wait for gateway to become available
-        // Check periodically with bounded retries
-        let attempts = 0;
-        const maxAttempts = 20;
-        const interval = setInterval(() => {
-          attempts++;
-          if (registerVoiceListener() || attempts >= maxAttempts) {
-            clearInterval(interval);
-            if (attempts >= maxAttempts && !listenerRegistered) {
-              log.error('Gave up waiting for Discord gateway after 60s');
-            }
-          }
-        }, 3000);
+      // If Discord is already connected, register immediately
+      if (gw.isConnected) {
+        registerVoiceListener(client);
+        return;
+      }
 
-        // Store interval ref for cleanup
-        this._waitInterval = interval;
-      },
+      // Otherwise wait for Discord READY event
+      client.registerListener({
+        type: 'READY',
+        parseRawData: (d) => d,
+        handle: () => {
+          registerVoiceListener(client);
+        },
+      });
 
-      async stop() {
-        if (this._waitInterval) clearInterval(this._waitInterval);
-        await stopBridge();
-        listenerRegistered = false;
-        log.info('Voice bridge service stopped');
-      },
+      log.info('[discord-realtime] Waiting for Discord READY to register voice listener');
+    });
 
-      health() {
-        return {
-          status: bridge?.isConnected ? 'healthy' : 'idle',
-          channel: bridge?.channelId || null,
-          realtimeConnected: bridge?.isRealtimeConnected || false,
-        };
-      },
+    // ── Hook: gateway_stop — clean teardown ──
+    api.on('gateway_stop', () => {
+      stopBridge().catch(err =>
+        log.error(`[discord-realtime] Error during gateway_stop cleanup: ${err.message}`)
+      );
     });
 
     // ── Command: /rtstatus ──
@@ -191,6 +181,6 @@ export default definePluginEntry({
       }),
     });
 
-    log.info(`Plugin registered — following ${followUserIds.size} user(s)`);
+    log.info(`[discord-realtime] Plugin registered — following ${followUserIds.size} user(s)`);
   },
 });
