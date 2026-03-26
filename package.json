@@ -1,5 +1,5 @@
 {
-  "name": "openclaw-discord-realtime",
+  "name": "discord-realtime",
   "version": "3.0.0",
   "description": "OpenClaw plugin: Discord voice ↔ OpenAI Realtime API with tool calling",
   "type": "module",
