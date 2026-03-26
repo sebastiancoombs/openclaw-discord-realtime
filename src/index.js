@@ -23,6 +23,10 @@ import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';
 import { getGateway } from 'openclaw/plugin-sdk/discord';
 import { VoiceBridge } from './voice-bridge.js';
 
+// Module-level guard: prevent duplicate listener registration across reloads
+let voiceListenerRegistered = false;
+let currentBridge = null;
+
 export default definePluginEntry({
   id: 'discord-realtime',
   name: 'Discord Realtime Voice',
@@ -39,17 +43,14 @@ export default definePluginEntry({
     }
 
     if (!process.env.OPENAI_API_KEY) {
-      log.warn('[discord-realtime] OPENAI_API_KEY not set — voice bridge will not work');
+      log.warn('[discord-realtime] OPENAI_API_KEY not set — plugin disabled');
+      return;
     }
-
-    // ── Bridge state ──
-    let bridge = null;
 
     async function startBridge(channelId, guildId) {
       // Don't re-join the same channel
-      if (bridge?.channelId === channelId && bridge?.isConnected) return;
+      if (currentBridge?.channelId === channelId && currentBridge?.isConnected) return;
 
-      // Tear down any existing bridge first
       await stopBridge();
 
       const gw = getGateway();
@@ -74,7 +75,7 @@ export default definePluginEntry({
       const botUserId = client.options?.clientId;
 
       try {
-        bridge = new VoiceBridge({
+        currentBridge = new VoiceBridge({
           channelId,
           guildId,
           adapterCreator,
@@ -87,22 +88,22 @@ export default definePluginEntry({
           log,
         });
 
-        await bridge.start();
+        await currentBridge.start();
         log.info(`[discord-realtime] Bridge active in channel ${channelId}`);
       } catch (err) {
         log.error(`[discord-realtime] Failed to start bridge: ${err.message}`);
-        bridge = null;
+        currentBridge = null;
       }
     }
 
     async function stopBridge() {
-      if (bridge) {
+      if (currentBridge) {
         try {
-          bridge.destroy();
+          currentBridge.destroy();
         } catch (err) {
           log.error(`[discord-realtime] Error destroying bridge: ${err.message}`);
         }
-        bridge = null;
+        currentBridge = null;
       }
     }
 
@@ -111,6 +112,9 @@ export default definePluginEntry({
      * Called once, when we know the gateway client exists.
      */
     function registerVoiceListener(client) {
+      if (voiceListenerRegistered) return;
+      voiceListenerRegistered = true;
+
       client.registerListener({
         type: 'VOICE_STATE_UPDATE',
         parseRawData: (d) => d,
@@ -165,6 +169,7 @@ export default definePluginEntry({
 
     // ── Hook: gateway_stop — clean teardown ──
     api.on('gateway_stop', () => {
+      voiceListenerRegistered = false;
       stopBridge().catch(err =>
         log.error(`[discord-realtime] Error during gateway_stop cleanup: ${err.message}`)
       );
@@ -175,8 +180,8 @@ export default definePluginEntry({
       name: 'rtstatus',
       description: 'Voice bridge status',
       handler: async () => ({
-        text: bridge
-          ? `🎙️ Voice: ✅ (${bridge.channelId}) | Realtime: ${bridge.isRealtimeConnected ? '✅' : '❌'}`
+        text: currentBridge
+          ? `🎙️ Voice: ✅ (${currentBridge.channelId}) | Realtime: ${currentBridge.isRealtimeConnected ? '✅' : '❌'}`
           : '🎙️ Voice bridge idle — join a voice channel to activate',
       }),
     });
