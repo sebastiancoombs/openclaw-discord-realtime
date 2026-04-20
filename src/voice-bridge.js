@@ -1,6 +1,6 @@
 /**
  * VoiceBridge — owns the full lifecycle:
- *   Discord voice connection ↔ audio pipeline ↔ OpenAI Realtime WebSocket
+ *   Discord voice connection ↔ audio pipeline ↔ selected voice provider
  *
  * Usage: create → start() → destroy(). No orphaned state.
  */
@@ -16,7 +16,7 @@ import {
   StreamType,
 } from '@discordjs/voice';
 import { PassThrough } from 'stream';
-import { RealtimeConnection } from './realtime-connection.js';
+import { createProvider } from './provider.js';
 import {
   createOpusDecoder,
   createOpusEncoder,
@@ -32,11 +32,9 @@ export class VoiceBridge {
    * @param {string} opts.guildId
    * @param {Function} opts.adapterCreator - from Carbon VoicePlugin.getGatewayAdapterCreator()
    * @param {string} opts.botUserId - bot's own user ID, to filter self-audio
-   * @param {string} opts.apiKey - OpenAI API key
-   * @param {string} opts.model
-   * @param {string} opts.voice
-   * @param {string} opts.systemPrompt
-   * @param {string} opts.turnDetection
+   * @param {object} opts.providerConfig
+   * @param {Array} opts.tools
+   * @param {Function|null} opts.executeTool
    * @param {object} opts.log - PluginLogger { info, warn, error }
    */
   constructor(opts) {
@@ -54,15 +52,7 @@ export class VoiceBridge {
     this._activeListeners = new Map();
     this._destroyed = false;
 
-    // OpenAI Realtime
-    this.realtime = new RealtimeConnection({
-      apiKey: opts.apiKey,
-      model: opts.model,
-      voice: opts.voice,
-      systemPrompt: opts.systemPrompt,
-      turnDetection: opts.turnDetection,
-      log: opts.log,
-    });
+    this.provider = createProvider({ ...(opts.providerConfig || {}), log: opts.log }, opts.tools || [], opts.executeTool || null);
   }
 
   get isConnected() {
@@ -70,7 +60,7 @@ export class VoiceBridge {
   }
 
   get isRealtimeConnected() {
-    return this.realtime.connected;
+    return this.provider.connected;
   }
 
   /**
@@ -105,34 +95,34 @@ export class VoiceBridge {
       }
     });
 
-    // 2. Wire Realtime API events → Discord playback
-    this.realtime.on('speech_started', () => {
+    // 2. Wire provider events → Discord playback
+    this.provider.on('speech_started', () => {
       if (this._streaming) this._endPlayback();
     });
 
-    this.realtime.on('audio', (pcmChunk) => {
+    this.provider.on('audio', (pcmChunk) => {
       if (!this._streaming) this._startPlayback();
       this._appendAudio(pcmChunk);
     });
 
-    this.realtime.on('audio_done', () => {
+    this.provider.on('audio_done', () => {
       this._endPlayback();
     });
 
-    this.realtime.on('user_transcript', (text) => {
+    this.provider.on('user_transcript', (text) => {
       this.log.info(`[discord-realtime] User: ${text}`);
     });
 
-    this.realtime.on('assistant_transcript', (text) => {
+    this.provider.on('assistant_transcript', (text) => {
       this.log.info(`[discord-realtime] Assistant: ${text}`);
     });
 
-    this.realtime.on('error', (err) => {
-      this.log.error(`[discord-realtime] Realtime error: ${err.message}`);
+    this.provider.on('error', (err) => {
+      this.log.error(`[discord-realtime] Provider error: ${err.message}`);
     });
 
-    this.realtime.on('disconnected', () => {
-      this.log.warn('[discord-realtime] Realtime API disconnected');
+    this.provider.on('disconnected', () => {
+      this.log.warn('[discord-realtime] Voice provider disconnected');
     });
 
     // Player events
@@ -145,11 +135,11 @@ export class VoiceBridge {
       this._streaming = false;
     });
 
-    // 3. Connect to OpenAI Realtime API
-    this.realtime.connect();
+    // 3. Connect to selected voice provider
+    this.provider.connect();
 
-    // 4. Start listening to Discord audio when Realtime is ready
-    this.realtime.once('ready', () => {
+    // 4. Start listening to Discord audio when provider is ready
+    this.provider.once('ready', () => {
       this._listenToAll();
     });
   }
@@ -187,7 +177,7 @@ export class VoiceBridge {
         .pipe(decoder)
         .pipe(downsampler)
         .on('data', (pcm) => {
-          if (!this._destroyed) this.realtime.sendAudio(pcm);
+          if (!this._destroyed) this.provider.sendAudio(pcm);
         })
         .on('end', cleanup)
         .on('error', (err) => {
@@ -243,8 +233,8 @@ export class VoiceBridge {
     this._endPlayback();
 
     // Realtime API
-    this.realtime.disconnect();
-    this.realtime.removeAllListeners();
+    this.provider.disconnect();
+    this.provider.removeAllListeners();
 
     // Voice channel
     if (this.connection) {

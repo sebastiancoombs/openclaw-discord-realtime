@@ -1,0 +1,10 @@
+{
+  "provider": "openai-realtime",
+  "followUserIds": ["YOUR_DISCORD_USER_ID"],
+  "systemPrompt": "You are AutoM8te, a drone swarm commander. Execute commands immediately. Be concise.",
+  "openai": {
+    "model": "gpt-4o-realtime-preview",
+    "voice": "coral",
+    "turnDetection": "semantic_vad"
+  }
+}

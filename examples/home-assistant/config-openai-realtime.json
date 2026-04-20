@@ -1,0 +1,10 @@
+{
+  "provider": "openai-realtime",
+  "followUserIds": ["YOUR_DISCORD_USER_ID"],
+  "systemPrompt": "You are a smart home assistant. Be friendly and concise.",
+  "openai": {
+    "model": "gpt-4o-realtime-preview",
+    "voice": "alloy",
+    "turnDetection": "semantic_vad"
+  }
+}

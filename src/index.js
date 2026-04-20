@@ -7,6 +7,7 @@
  * register(api):
  *   - Registers a gateway_start hook (deferred, non-blocking)
  *   - Registers a /rtstatus command
+ *   - Supports pluggable voice providers via config.provider
  *   - Does NOT start anything or poll anything
  *
  * gateway_start hook:
@@ -42,8 +43,9 @@ export default definePluginEntry({
       return;
     }
 
-    if (!process.env.OPENAI_API_KEY) {
-      log.warn('[discord-realtime] OPENAI_API_KEY not set — plugin disabled');
+    const providerName = config.provider || 'openai-realtime';
+    if (providerName === 'openai-realtime' && !process.env.OPENAI_API_KEY) {
+      log.warn('[discord-realtime] OPENAI_API_KEY not set, openai-realtime provider disabled');
       return;
     }
 
@@ -80,16 +82,25 @@ export default definePluginEntry({
           guildId,
           adapterCreator,
           botUserId,
-          apiKey: process.env.OPENAI_API_KEY,
-          model: config.model || 'gpt-4o-realtime-preview',
-          voice: config.voice || 'coral',
-          systemPrompt: config.systemPrompt || 'You are a voice assistant. Be concise.',
-          turnDetection: config.turnDetection || 'semantic_vad',
+          providerConfig: {
+            provider: providerName,
+            systemPrompt: config.systemPrompt || 'You are a voice assistant. Be concise.',
+            model: config.model,
+            voice: config.voice,
+            turnDetection: config.turnDetection,
+            openai: config.openai,
+            elevenlabs: config.elevenlabs,
+            llm: config.llm,
+            silenceMs: config.silenceMs,
+            silenceThreshold: config.silenceThreshold,
+          },
+          tools: config.tools || [],
+          executeTool: null,
           log,
         });
 
         await currentBridge.start();
-        log.info(`[discord-realtime] Bridge active in channel ${channelId}`);
+        log.info(`[discord-realtime] Bridge active in channel ${channelId} via ${providerName}`);
       } catch (err) {
         log.error(`[discord-realtime] Failed to start bridge: ${err.message}`);
         currentBridge = null;

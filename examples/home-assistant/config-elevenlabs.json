@@ -1,0 +1,17 @@
+{
+  "provider": "elevenlabs",
+  "followUserIds": ["YOUR_DISCORD_USER_ID"],
+  "systemPrompt": "You are a smart home assistant. Be friendly and concise.",
+  "silenceMs": 1500,
+  "silenceThreshold": 200,
+  "elevenlabs": {
+    "apiKey": "env:ELEVENLABS_API_KEY",
+    "voiceId": "pNInz6obpgDQGcFmaJgB",
+    "modelId": "eleven_flash_v2_5"
+  },
+  "llm": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "apiKey": "env:ANTHROPIC_API_KEY"
+  }
+}
